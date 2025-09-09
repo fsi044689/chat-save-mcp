@@ -56,7 +56,6 @@ Files are stored per project under `<PROJECT_ROOT>/.chat-history/<DIALOG>/` as `
 
   - Flat (default): first line may be `M:<compact-json-maintenance>` like `M:{"action":"compact","reason":"bytes_exceed_comfort_zone",...}`
   - JSON: response includes a `maintenance` field, e.g.
-  ```
   {
     "summary": "...optional...",
     "messages": [{"role":"user","text":"...","ts":...}, ...],
@@ -70,7 +69,7 @@ Files are stored per project under `<PROJECT_ROOT>/.chat-history/<DIALOG>/` as `
       "backup": { "enabled": true, "retention": 5 }
     }
   }
-  ```
+
 
   Compaction procedure: `history_clear` → `history_set_summary({mode:'merge'})` → batch `history_save({entries:[...]})` of essential turns only.
 

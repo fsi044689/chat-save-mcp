@@ -60,7 +60,6 @@
   - flat（默认）返回：首行会出现 `M:<紧凑JSON维护信息>`，例如：
     `M:{"action":"compact","reason":"bytes_exceed_comfort_zone",...}`
   - json 返回：在结果对象中包含 `maintenance` 字段，例如：
-  ```
   {
     "summary": "...可选...",
     "messages": [ {"role":"user","text":"...","ts":...}, ... ],
@@ -74,7 +73,7 @@
       "backup": { "enabled": true, "retention": 5 }
     }
   }
-  ```
+
 
   落盘压缩建议流程：`history_clear` → `history_set_summary({mode:'merge'})` → 使用 `history_save({entries:[...]})` 批量回灌“仅核心/必要”的历史消息。
 
