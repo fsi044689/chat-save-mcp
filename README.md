@@ -1,6 +1,6 @@
 # MCP History Store
 
-[中文说明 / Chinese README](README.zh-CN.md)
+[Chinese README](README.zh-CN.md)
 
 A minimal Model Context Protocol (MCP) server that provides local, file‑based storage for conversation history and a rolling JSON summary. The model (LLM) manages summarization; this MCP only stores/reads.
 
