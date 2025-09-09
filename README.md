@@ -15,41 +15,40 @@ A minimal Model Context Protocol (MCP) server that provides local, file‑based 
 
 Files are stored per project under `<PROJECT_ROOT>/.chat-history/<DIALOG>/` as `messages.json` and `summary.json` (set `CODEX_HISTORY_ROOT=/another/base` to override the base directory if needed).
 
-## System Prompt (copy‑paste into Codex)
-```text
-- MCP 工具名：history（以下为工具名称，已改为下划线以满足 ^[a-zA-Z0-9_-]+$）
-  - history_list_dialogs({projectRoot}) -> {dialogs}
-  - history_get_summary({projectRoot, dialog}) -> {summary|null}
-  - history_set_summary({projectRoot, dialog, summary}) -> {ok:true}
-  - history_fetch({projectRoot, dialog, recentTurns?}) -> {messages:[{role,text,ts}]}
-  - history_save({projectRoot, dialog, entry:{role:'user'|'assistant',text,ts?}}) -> {ok:true}
-  - history_clear({projectRoot, dialog}) -> {ok:true}
+## Agent Integration (Required)
+Agents MUST use this MCP to manage dialog history and summary. The tool name must be `history`.
 
-- 约定
-  - projectRoot = <ABS_PROJECT_ROOT>
-  - 工具返回在第一个 text 内容项里，需 JSON.parse(content[0].text)
+Tool methods
+- `history_list_dialogs({ projectRoot }) -> { dialogs }`
+- `history_get_summary({ projectRoot, dialog }) -> { summary | null }`
+- `history_set_summary({ projectRoot, dialog, summary }) -> { ok: true }`
+- `history_fetch({ projectRoot, dialog, recentTurns? }) -> { messages: [{ role, text, ts }] }`
+- `history_save({ projectRoot, dialog, entry:{ role: 'user'|'assistant', text, ts? } }) -> { ok: true }`
+- `history_clear({ projectRoot, dialog }) -> { ok: true }`
 
-- 对话名策略
-  - 维护工作变量 dialog
-  - 新任务且无活动对话：
-    1) {dialogs}=JSON.parse(call history_list_dialogs({projectRoot}))
-    2) 让用户选已有对话作为后续基准；若无，让用户给定新对话名：短横线小写 ≤40 字（如 refactor-message-store）
-  - 后续轮次复用该 dialog
+Conventions
+- `projectRoot` is an absolute path of the active project.
+- MCP tool responses are returned in the first content item: parse with `JSON.parse(content[0].text)`.
 
-- 新对话读取记忆
-  - {summary}=JSON.parse(call history_get_summary({projectRoot, dialog}))
-  - {messages}=JSON.parse(call history_fetch({projectRoot, dialog, recentTurns:6}))
-  - 回答时将 summary+messages 作为权威历史（无需用户提示）
+Session initialization (do once per dialog)
+1) `dialogs = JSON.parse(call history_list_dialogs({ projectRoot }))`
+2) Ask user to pick an existing dialog or provide a new short kebab-case name (≤ 40 chars). Maintain a working variable `dialog` and reuse it in later turns.
+3) Load context for the chosen dialog:
+   - `summary = JSON.parse(call history_get_summary({ projectRoot, dialog }))`
+   - `messages = JSON.parse(call history_fetch({ projectRoot, dialog, recentTurns: 6 }))`
+   Use `summary + messages` as authoritative history in reasoning and answers.
 
-- 重要回答后自动写回
-  - call history_save({projectRoot, dialog, entry:{role:'user', text:<USER_MESSAGE>}})
-  - call history_save({projectRoot, dialog, entry:{role:'assistant', text:<FINAL_ANSWER>}})
-  - 基于“旧 summary + 本轮新问答”增量重写 summary，结构：
-    {version:1, decisions:[], constraints:[], todos:[], issues:[], facts:[], refs:[{type:'file|api|url',value,hint}]}
-    规则：偏抽象标识，去重，~700 tokens，勿丢决策/TODO/ISSUE
-  - call history_set_summary({projectRoot, dialog, summary:<JSON_STRING>})
-  - 任一工具失败：不中断作答，仅跳过记忆流程
-```
+Low-frequency save policy (thresholds are verbally adjustable)
+- Save only in these cases; otherwise do not call tools:
+  - Important answers: response includes clearly structured sections like “Decisions/Constraints/TODO/Issues/Refs” → save immediately.
+  - Turn budget K: after every K assistant turns (default `K = 5`).
+  - Byte budget B: when accumulated unsaved text ≥ B (default `B = 48KB`).
+  - Manual: when the user says “save”/“sync”.
+- When saving:
+  - Call `history_save` sequentially for all messages since last save (chronological order), e.g., user then assistant.
+  - Summary throttling: update via `history_set_summary` only on “important saves” or every M-th save (default `M = 3`). Target ~700 tokens; structure:
+    `{ version: 1, decisions: [], constraints: [], todos: [], issues: [], facts: [], refs: [{ type: 'file'|'api'|'url', value, hint }] }`.
+  - If any tool call fails, do not interrupt the conversation; skip saving for this round.
 
 ## Notes
 - Tool functions implemented: `history.fetch`, `history.save`, `history.getSummary`, `history.setSummary`, `history.clear`.
