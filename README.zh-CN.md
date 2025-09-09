@@ -16,6 +16,14 @@
 
 存储路径（按项目与对话隔离）：`<PROJECT_ROOT>/.chat-history/<DIALOG>/{messages.json, summary.json}`。
 
+## Agent 集成（必须）
+Agent 必须使用本 MCP 的 `history` 工具来管理会话的“对话历史与结构化摘要”。在首次初始化时：
+
+- 仅在会话开始时执行一次读取：`history_list_dialogs` 选择/创建 `dialog`，然后 `history_get_summary` + `history_fetch(6)` 载入上下文；后续轮次复用该 `dialog`。
+- 采用“低频保存策略”：仅在重要回答、达到阈值 K/B，或用户手动指示“保存/同步”时调用 `history_save`/`history_set_summary`；任一工具失败不阻断对话。
+
+下方给出可直接粘贴到 Codex 的系统提示词作为参考。
+
 ## 系统提示词（粘贴到 Codex 的 System Prompt）
 ```text
 - MCP 工具名：history（以下为工具名称）
@@ -50,3 +58,6 @@
 - 工具离线、确定性；不进行网络调用。
 - 写入采用原子方式，避免半写损坏。
 - `summary.json` 若为历史双重转义格式，服务器在读取时会自动修复并回写为标准 JSON。
+
+## 许可证
+本项目采用 Apache-2.0 协议授权，详见 `LICENSE` 文件。

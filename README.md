@@ -55,4 +55,7 @@ Low-frequency save policy (thresholds are verbally adjustable)
 - Storage layout per session: `messages.json` (rolling raw turns), `summary.json` (structured JSON string).
 - For quick inspection, set `CODEX_HISTORY_ROOT=/tmp/codex_history` before `pnpm start`.
 
+## License
+Licensed under the Apache License, Version 2.0. See `LICENSE` for details.
+
  
