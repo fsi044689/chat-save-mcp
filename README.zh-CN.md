@@ -23,19 +23,26 @@
 ##Agent 必须使用本 MCP 的 `history` 工具来管理会话的“对话历史与结构化摘要”。
 - MCP 工具名：history（以下为工具名称）
   - history_list_dialogs({projectRoot}) -> {dialogs}
-  - history_get_summary({projectRoot, dialog}) -> {summary|null}
-  - history_set_summary({projectRoot, dialog, summary}) -> {ok:true}
-  - history_fetch({projectRoot, dialog, recentTurns?}) -> {messages:[{role,text,ts}]}
-  - history_save({projectRoot, dialog, entry:{role:'user'|'assistant',text,ts?}}) -> {ok:true}
+  - history_set_summary({projectRoot, dialog, summary, mode?:'merge'|'replace'}) -> {ok:true, mode}
+  - history_get_dialog_detail({projectRoot, dialog, recentTurns?, format?, includeSummary?, includeMessages?}) ->
+    - 默认 format:'flat' 返回纯文本：首行可选 `M:<紧凑JSON维护信息>`，其后可选 `S:<紧凑JSON摘要>`，随后 `U:/A:` 行
+    - 传 format:'json' 时返回 JSON：{ summary?, messages?, maintenance? }（字段是否出现由 include* 参数决定）
+  - history_save({projectRoot, dialog, entry?:{role:'user'|'assistant',text,ts?}, entries?:[{role:'user'|'assistant',text,ts?},...]}) -> {ok:true, saved}
   - history_clear({projectRoot, dialog}) -> {ok:true}
 
 - 约定
   - projectRoot = <ABS_PROJECT_ROOT>
-  - 工具返回在第一个 text 内容项里，需 JSON.parse(content[0].text)
+  - 返回位于第一个 text 内容项。默认查询返回纯文本（flat）；如需 JSON 结构可传 format:'json' 获取 {summary?,messages?,maintenance?}。
+  - 支持部分查询：通过 includeSummary:false 或 includeMessages:false，仅取所需内容以节省 tokens。
+  - 更新摘要：默认使用 mode:"merge" 以保留既有重点；仅当需要重置时才用 mode:"replace"。
 
 - 会话初始化（只做一次）
   - 先 history_list_dialogs 选定 dialog
-  - 然后 history_get_summary + history_fetch(6)
+  - 然后 history_get_dialog_detail({recentTurns:6})（默认 flat）一次性获取“摘要+最小体量上下文”（默认同时包含两者）
+  - 提示：任何需要“压缩/重组”时，必须以 detail 返回的数据为准进行“总结与回灌”，包括且不限于：
+    - S: 行中的 JSON 摘要内容（若有）
+    - U:/A: 行中的历史消息文本（若有；这些行将直接决定回灌用的 entries 内容）
+  - 后续当仅需要“消息”或仅需要“摘要”时，可用 include* 参数做精确查询，减少上下文体量
 
 - 保存策略（低频、可口头修改阈值）
   - 仅以下情况调用保存，否则不调用任何工具：
@@ -44,9 +51,54 @@
     - 字节上限 B：累计未保存文本 ≥ B 立即保存（默认 B=48KB）
     - 手动：用户说“保存/同步”时立即保存
   - 执行保存时：
-    - 依次调用 history_save 写入自上次保存以来的全部消息（批量，按时间顺序）
+    - 优先使用“批量”：history_save({entries:[...]}) 按时间顺序回灌“必要/关键”的历史消息；entries 的来源必须是本次 detail 的 U:/A: 行（不是只包含清理后的新对话）
     - 摘要节流：仅在“重要保存”或每满 M 次保存后调用一次 history_set_summary（默认 M=3；~700 tokens，按决策/约束/TODO/ISSUE/事实/引用组织）
   - 任何工具失败：不中断对话，直接跳过保存本次
+
+- 当对话历史超出“上下文舒适区”时，由 `history_get_dialog_detail` 返回维护信息，提示 Agent 进行压缩整理：
+
+  - flat（默认）返回：首行会出现 `M:<紧凑JSON维护信息>`，例如：
+    `M:{"action":"compact","reason":"bytes_exceed_comfort_zone",...}`
+  - json 返回：在结果对象中包含 `maintenance` 字段，例如：
+  ```
+  {
+    "summary": "...可选...",
+    "messages": [ {"role":"user","text":"...","ts":...}, ... ],
+    "maintenance": {
+      "action": "compact",
+      "importance": "high",
+      "reason": "messages_count_exceeds_comfort_zone" | "bytes_exceed_comfort_zone",
+      "guidance": "先进行总结：必须基于本次 detail 返回的 S 摘要与 U/A 历史消息共同生成‘新的全量摘要’；然后依次调用 history_clear（会自动备份）、history_set_summary({mode:'merge'}) 写入新摘要；最后用 history_save({entries:[...]}) 批量回灌：entries 必须从 detail 的 U:/A: 行中挑选（或经最小合并重述）而来，不得只包含此次清理后的新对话。",
+      "thresholds": { "maxMessages": 200, "maxBytes": 65536 },
+      "metrics": { "messages": 321, "approxBytes": 91234 },
+      "backup": { "enabled": true, "retention": 5 }
+    }
+  }
+  ```
+
+  落盘压缩建议流程：`history_clear` → `history_set_summary({mode:'merge'})` → 使用 `history_save({entries:[...]})` 批量回灌“仅核心/必要”的历史消息。
+
+  环境变量（可覆盖默认）：
+  - `HISTORY_CONTEXT_MAX_MESSAGES`（默认 200）
+  - `HISTORY_CONTEXT_MAX_BYTES`（默认 65536）
+  - `HISTORY_BACKUP_RETENTION`（默认 5）
+
+`history_clear` 会将现有 `messages.json`/`summary.json` 备份到 `<DIALOG>/backups/<timestamp>_<rand>/`，并只保留最近 N 份（按 `retention`）。  
+```
+
+### 最小提示词（可直接复制）
+```text
+AGENT 规则: 必须使用 MCP 工具 history。
+返回: 默认 query(flat) 为纯文本，首行可选 `M:<紧凑JSON维护>`，其次可选 `S:<紧凑JSON摘要>`，随后若干行 `U:/A: <text>`；如需 JSON 传 format:'json' 得到 {summary?,messages?,maintenance?}。
+初始化: history_list_dialogs({projectRoot}); history_get_dialog_detail({projectRoot,dialog,recentTurns:6}).
+保存策略: 触发=重要回答|每K=5次助手回合|未保存字节≥B=49152|用户说"保存|同步"; 执行=优先批量 history_save({entries:[...]}); 仅在重要保存或每M=3次保存调用 history_set_summary({mode:'merge'}); 失败跳过本轮。
+维护信号: 仅在 history_get_dialog_detail 返回（flat=M:行，json=maintenance 字段）。当出现维护信号时：
+1) 先“整合总结”：必须同时吸收本次 detail 的 S 摘要内容与 U/A 历史消息文本，生成新的完整摘要；
+2) 清理：history_clear({projectRoot,dialog});
+3) 写摘要：history_set_summary({projectRoot,dialog,summary:newSummary,mode:'merge'});
+4) 回灌：使用 history_save({entries:[...]}) 批量写入“必要/关键”的历史消息；entries 必须来源于本次 detail 的 U:/A: 行（可做少量合并重述以减少体量），不得只回灌“新对话”。
+清理: history_clear 先备份到 .chat-history/<dialog>/backups/<timestamp>_<rand>/, 仅保留最近5份。
+工具: history_list_dialogs; history_set_summary(mode:'merge'); history_get_dialog_detail(format?,include*?); history_save(支持 entries 批量); history_clear。
 ```
 
 ## 注意事项
