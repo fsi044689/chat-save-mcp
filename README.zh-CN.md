@@ -17,15 +17,10 @@
 存储路径（按项目与对话隔离）：`<PROJECT_ROOT>/.chat-history/<DIALOG>/{messages.json, summary.json}`。
 
 ## Agent 集成（必须）
-Agent 必须使用本 MCP 的 `history` 工具来管理会话的“对话历史与结构化摘要”。在首次初始化时：
 
-- 仅在会话开始时执行一次读取：`history_list_dialogs` 选择/创建 `dialog`，然后 `history_get_summary` + `history_fetch(6)` 载入上下文；后续轮次复用该 `dialog`。
-- 采用“低频保存策略”：仅在重要回答、达到阈值 K/B，或用户手动指示“保存/同步”时调用 `history_save`/`history_set_summary`；任一工具失败不阻断对话。
-
-下方给出可直接粘贴到 Codex 的系统提示词（与 AGENTS.md 保持一致）。
-
-## 系统提示词（粘贴到 Codex 的 System Prompt）
+## 系统提示词（粘贴到 Codex 的 AGENTS.md 或 其他设置agent提示词的地方）
 ```text
+##Agent 必须使用本 MCP 的 `history` 工具来管理会话的“对话历史与结构化摘要”。
 - MCP 工具名：history（以下为工具名称）
   - history_list_dialogs({projectRoot}) -> {dialogs}
   - history_get_summary({projectRoot, dialog}) -> {summary|null}

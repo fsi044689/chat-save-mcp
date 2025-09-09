@@ -16,10 +16,11 @@ A minimal Model Context Protocol (MCP) server that provides local, file‑based 
 Files are stored per project under `<PROJECT_ROOT>/.chat-history/<DIALOG>/` as `messages.json` and `summary.json` (set `CODEX_HISTORY_ROOT=/another/base` to override the base directory if needed).
 
 ## Agent Integration (Required)
-Agents MUST use this MCP `history` tool to manage dialog history and the structured JSON summary.
 
-## System Prompt (copy‑paste into Codex)
+
+## System Prompt (copy‑paste into Codex's AGENTS.md or other prompt guidance)
 ```text
+##Agents MUST use this MCP `history` tool to manage dialog history and the structured JSON summary.
 - MCP tool name: history
   - history_list_dialogs({projectRoot}) -> {dialogs}
   - history_get_summary({projectRoot, dialog}) -> {summary|null}
