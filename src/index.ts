@@ -42,13 +42,21 @@ const readJSON = <T>(p: string, def: T): T => {
     return def;
   }
 };
+// Atomic write: write to tmp file in same dir then rename
+const writeFileAtomic = (targetPath: string, data: string | Buffer) => {
+  const dir = path.dirname(targetPath);
+  const tmp = path.join(dir, ".tmp-" + crypto.randomBytes(6).toString("hex") + ".tmp");
+  fs.writeFileSync(tmp, data, { encoding: typeof data === "string" ? "utf8" : undefined });
+  fs.renameSync(tmp, targetPath);
+};
+
 const writeJSON = (p: string, v: unknown) => {
-  fs.writeFileSync(p, JSON.stringify(v, null, 2), "utf8");
+  writeFileAtomic(p, JSON.stringify(v, null, 2));
 };
 
 const fileSize = (p: string) => (fs.existsSync(p) ? fs.statSync(p).size : 0);
 
-const readSummaryNormalized = (projectRoot: string, dialog: string): string | null => {
+export const readSummaryNormalized = (projectRoot: string, dialog: string): string | null => {
   const sumPath = pSum(projectRoot, dialog);
   if (!fs.existsSync(sumPath)) return null;
   let summary: string | null = null;
@@ -98,11 +106,40 @@ const checkComfort = (projectRoot: string, dialog: string) => {
   } as const;
 };
 
+export const escFlatText = (s: string): string =>
+  String(s)
+    .replace(/\\/g, "\\\\")
+    .replace(/\n/g, "\\n")
+    .replace(/\r/g, "\\r");
+
 const transport = new StdioServerTransport();
 const server = new McpServer(
   { name: "mcp-history-store", version: "0.1.0" },
   { capabilities: { tools: {} } }
 );
+
+// Simple per-dialog in-process mutex to serialize writes
+const dialogLocks = new Map<string, Promise<any>>();
+export const runExclusive = async <T>(dialogKey: string, fn: () => Promise<T>): Promise<T> => {
+  const prev = dialogLocks.get(dialogKey) ?? Promise.resolve();
+  let resolveNext: (v: any) => void;
+  const next = new Promise((r) => (resolveNext = r));
+  dialogLocks.set(dialogKey, prev.then(() => next));
+  // Ensure execution starts only after previous completes
+  await prev;
+  try {
+    const result = await fn();
+    resolveNext!(undefined);
+    const tail = dialogLocks.get(dialogKey);
+    if (tail === next) dialogLocks.delete(dialogKey);
+    return result;
+  } catch (e) {
+    resolveNext!(undefined);
+    const tail = dialogLocks.get(dialogKey);
+    if (tail === next) dialogLocks.delete(dialogKey);
+    throw e;
+  }
+};
 
 // Shared handler for dialog detail (summary + messages)
 const handleGetDialogDetail = async ({ projectRoot, dialog, recentTurns = 6, format = "flat", includeSummary = true, includeMessages = true }: any) => {
@@ -147,7 +184,12 @@ const handleGetDialogDetail = async ({ projectRoot, dialog, recentTurns = 6, for
       parts.push(`S:${compact}`);
     }
     if (includeMessages) {
-      for (const m of slice) parts.push(`${m.role === "user" ? "U" : "A"}: ${m.text}`);
+      const esc = (s: string) =>
+        String(s)
+          .replace(/\\/g, "\\\\")
+          .replace(/\n/g, "\\n")
+          .replace(/\r/g, "\\r");
+      for (const m of slice) parts.push(`${m.role === "user" ? "U" : "A"}: ${esc(m.text)}`);
     }
     return { content: [{ type: "text", text: parts.join("\n") }] } as any;
   }
@@ -205,6 +247,7 @@ server.registerTool(
           role: z.enum(["user", "assistant"]),
           text: z.string(),
           ts: z.number().optional(),
+          meta: z.record(z.any()).optional(),
         })
         .optional(),
       entries: z
@@ -213,6 +256,7 @@ server.registerTool(
             role: z.enum(["user", "assistant"]),
             text: z.string(),
             ts: z.number().optional(),
+            meta: z.record(z.any()).optional(),
           })
         )
         .optional(),
@@ -221,31 +265,34 @@ server.registerTool(
   async ({ projectRoot, dialog, entry, entries }) => {
     const root = projectRoot ?? (undefined as any);
     const dlg = dialog ?? "default";
-    const arr = readJSON<any[]>(pMsg(root, dlg), []);
-    const toAppend: any[] = [];
-    if (entries && Array.isArray(entries)) {
-      let baseTs = Date.now();
-      for (let i = 0; i < entries.length; i++) {
-        const e = entries[i];
-        toAppend.push({ ...e, ts: e?.ts ?? baseTs + i });
+    const key = `${root}::${dlg}`;
+    return runExclusive(key, async () => {
+      const arr = readJSON<any[]>(pMsg(root, dlg), []);
+      const toAppend: any[] = [];
+      if (entries && Array.isArray(entries)) {
+        let baseTs = Date.now();
+        for (let i = 0; i < entries.length; i++) {
+          const e = entries[i];
+          toAppend.push({ ...e, ts: e?.ts ?? baseTs + i });
+        }
       }
-    }
-    if (entry) {
-      toAppend.push({ ...entry, ts: entry?.ts ?? Date.now() });
-    }
-    if (toAppend.length === 0) {
-      return { content: [{ type: "text", text: JSON.stringify({ ok: false, error: "No entry/entries provided" }) }] } as any;
-    }
-    // append in given order
-    for (const e of toAppend) arr.push(e);
-    if (arr.length > 300) {
-      const keep = arr.slice(-300);
-      writeJSON(pMsg(root, dlg), keep);
-    } else {
-      writeJSON(pMsg(root, dlg), arr);
-    }
-    // Do not return maintenance here; detection moved to query (get_dialog_detail)
-    return { content: [{ type: "text", text: JSON.stringify({ ok: true, saved: toAppend.length }) }] } as any;
+      if (entry) {
+        toAppend.push({ ...entry, ts: entry?.ts ?? Date.now() });
+      }
+      if (toAppend.length === 0) {
+        return { content: [{ type: "text", text: JSON.stringify({ ok: false, error: "No entry/entries provided" }) }] } as any;
+      }
+      // append in given order
+      for (const e of toAppend) arr.push(e);
+      if (arr.length > 300) {
+        const keep = arr.slice(-300);
+        writeJSON(pMsg(root, dlg), keep);
+      } else {
+        writeJSON(pMsg(root, dlg), arr);
+      }
+      // Do not return maintenance here; detection moved to query (get_dialog_detail)
+      return { content: [{ type: "text", text: JSON.stringify({ ok: true, saved: toAppend.length }) }] } as any;
+    });
   }
 );
 
@@ -342,7 +389,10 @@ server.registerTool(
 
     try {
       const pretty = JSON.stringify(toWrite, null, 2);
-      fs.writeFileSync(pSum(root, dlg), pretty, "utf8");
+      const key = `${root}::${dlg}::summary`;
+      await runExclusive(key, async () => {
+        writeFileAtomic(pSum(root, dlg), pretty);
+      });
       return { content: [{ type: "text", text: JSON.stringify({ ok: true, mode }) }] } as any;
     } catch (e: any) {
       return {
@@ -444,4 +494,146 @@ server.registerTool(
   }
 );
 
-await server.connect(transport);
+// history.get_messages_since — Incremental messages fetch (simple)
+server.registerTool(
+  "history_get_messages_since",
+  {
+    description: "Get messages with ts > sinceTs, limited (default 50, hard cap 200)",
+    inputSchema: { projectRoot: z.string(), dialog: z.string(), sinceTs: z.number().optional(), limit: z.number().optional() },
+  },
+  async ({ projectRoot, dialog, sinceTs, limit }) => {
+    const root = projectRoot ?? (undefined as any);
+    const dlg = dialog ?? "default";
+    const arr = readJSON<any[]>(pMsg(root, dlg), []);
+    const lim = Math.max(1, Math.min(Number(limit ?? 50), 200));
+    let out: any[];
+    if (sinceTs == null) {
+      out = arr.slice(-lim);
+    } else {
+      out = arr.filter((m) => (m?.ts ?? 0) > sinceTs).slice(0, lim);
+    }
+    return { content: [{ type: "text", text: JSON.stringify({ messages: out }) }] } as any;
+  }
+);
+
+// history.stats — Quick stats for a dialog
+server.registerTool(
+  "history_stats",
+  {
+    description: "Get message count, bytes, last timestamp, backups",
+    inputSchema: { projectRoot: z.string(), dialog: z.string() },
+  },
+  async ({ projectRoot, dialog }) => {
+    const root = projectRoot ?? (undefined as any);
+    const dlg = dialog ?? "default";
+    const msgPath = pMsg(root, dlg);
+    const sumPath = pSum(root, dlg);
+    const arr = readJSON<any[]>(msgPath, []);
+    const lastTs = arr.length ? arr[arr.length - 1]?.ts ?? null : null;
+    const bytes = fileSize(msgPath) + fileSize(sumPath);
+    const dialogDir = resolveDialogDir(root, dlg);
+    const backupsRoot = path.join(dialogDir, "backups");
+    let backups = 0;
+    if (fs.existsSync(backupsRoot)) {
+      try {
+        backups = fs.readdirSync(backupsRoot, { withFileTypes: true }).filter((e) => e.isDirectory()).length;
+      } catch {}
+    }
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            messages: arr.length,
+            approxBytes: bytes,
+            lastTs,
+            backups,
+            thresholds: { maxMessages: MAX_CONTEXT_MESSAGES, maxBytes: MAX_CONTEXT_BYTES },
+          }),
+        },
+      ],
+    } as any;
+  }
+);
+
+// history.list_backups — List available backups for a dialog
+server.registerTool(
+  "history_list_backups",
+  {
+    description: "List backups (id, mtime, files) for a dialog",
+    inputSchema: { projectRoot: z.string(), dialog: z.string() },
+  },
+  async ({ projectRoot, dialog }) => {
+    const root = projectRoot ?? (undefined as any);
+    const dlg = dialog ?? "default";
+    const dialogDir = resolveDialogDir(root, dlg);
+    const backupsRoot = path.join(dialogDir, "backups");
+    let list: any[] = [];
+    if (fs.existsSync(backupsRoot)) {
+      try {
+        list = fs
+          .readdirSync(backupsRoot, { withFileTypes: true })
+          .filter((e) => e.isDirectory())
+          .map((e) => {
+            const full = path.join(backupsRoot, e.name);
+            const files = fs.readdirSync(full).filter((f) => f.endsWith(".json"));
+            const mtime = fs.statSync(full).mtimeMs;
+            return { id: e.name, mtime, files };
+          })
+          .sort((a, b) => b.mtime - a.mtime);
+      } catch {}
+    }
+    return { content: [{ type: "text", text: JSON.stringify({ backups: list }) }] } as any;
+  }
+);
+
+// history.restore_backup — Restore a specific backup (creates a new backup of current before restoring)
+server.registerTool(
+  "history_restore_backup",
+  {
+    description: "Restore a backup by id; current files are backed up first",
+    inputSchema: { projectRoot: z.string(), dialog: z.string(), id: z.string() },
+  },
+  async ({ projectRoot, dialog, id }) => {
+    const root = projectRoot ?? (undefined as any);
+    const dlg = dialog ?? "default";
+    const dialogDir = resolveDialogDir(root, dlg);
+    const backupsRoot = path.join(dialogDir, "backups");
+    const srcDir = path.join(backupsRoot, id);
+    if (!fs.existsSync(srcDir) || !fs.statSync(srcDir).isDirectory()) {
+      return { content: [{ type: "text", text: JSON.stringify({ ok: false, error: "Backup not found" }) }] } as any;
+    }
+    // Backup current first via history_clear's backup logic but without deleting; implement lightweight backup
+    const nowStamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const suffix = crypto.randomBytes(3).toString("hex");
+    const destBackup = path.join(backupsRoot, `${nowStamp}_pre-restore_${suffix}`);
+    mkdirpSync(destBackup);
+    const msgPath = pMsg(root, dlg);
+    const sumPath = pSum(root, dlg);
+    const tryCopy = (from: string, to: string) => {
+      try {
+        if (fs.existsSync(from)) fs.copyFileSync(from, to);
+      } catch {}
+    };
+    tryCopy(msgPath, path.join(destBackup, path.basename(msgPath)));
+    tryCopy(sumPath, path.join(destBackup, path.basename(sumPath)));
+
+    // Restore files atomically with mutex
+    const key = `${root}::${dlg}::restore`;
+    await runExclusive(key, async () => {
+      const srcMsg = path.join(srcDir, path.basename(msgPath));
+      const srcSum = path.join(srcDir, path.basename(sumPath));
+      if (fs.existsSync(srcMsg)) writeFileAtomic(msgPath, fs.readFileSync(srcMsg));
+      if (fs.existsSync(srcSum)) writeFileAtomic(sumPath, fs.readFileSync(srcSum));
+    });
+
+    return { content: [{ type: "text", text: JSON.stringify({ ok: true, restored: id }) }] } as any;
+  }
+);
+
+// Allow disabling auto-connect for tests via MCP_AUTOSTART=0
+if (process.env.MCP_AUTOSTART !== '0') {
+  await server.connect(transport);
+}
+
+export const serverInstance = server;
